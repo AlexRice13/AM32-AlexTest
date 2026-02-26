@@ -914,6 +914,25 @@ void commutate()
 #endif
 }
 
+// Adjust commutation advance timing based on the demag metric.
+// When demagnetization is elevated, the advance is reduced proportionally to
+// avoid commutating too early, which would worsen demag events.
+// Only active when demag compensation is enabled (demag_pwr_off_thresh < 255).
+// demag_metric range: 120 (healthy) to 255 (heavy demag); reduction scales
+// linearly from 0 at baseline up to ~100% of advance at metric=248+.
+static inline void adjust_comm_timing(void)
+{
+    if (demag_pwr_off_thresh >= 255 || demag_metric <= 120) {
+        return;
+    }
+    uint16_t reduction = (uint16_t)(((uint32_t)(demag_metric - 120) * advance) >> 7);
+    if (reduction < advance) {
+        advance -= reduction;
+    } else {
+        advance = 0;
+    }
+}
+
 void PeriodElapsedCallback()
 {
     DISABLE_COM_TIMER_INT(); // disable interrupt
@@ -924,6 +943,7 @@ void PeriodElapsedCallback()
 	} else {
 	  advance = (commutation_interval * auto_advance_level) >> 6; // 60 divde 64 0.9375 degree increments
     }
+    adjust_comm_timing(); // reduce advance proportionally to demag metric excess
     waitTime = (commutation_interval >> 1) - advance;
     if (!old_routine) {
         enableCompInterrupts(); // enable comp interrupt
