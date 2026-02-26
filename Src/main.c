@@ -862,12 +862,13 @@ void commutate()
         if (demag_metric > demag_metric_max) {
             demag_metric_max = demag_metric;
         }
-        // If demag metric exceeds threshold, cut power (demag compensation)
+        // If demag metric exceeds threshold, cut power temporarily (demag compensation).
+        // Re-synchronization is automatic: comStep(step) below applies the new commutation
+        // phase (restoring power) and changeCompInput() re-enables BEMF zero-cross sensing.
+        // The motor freewheels briefly then self-resynchronizes via back-EMF tracking.
         if (demag_metric > demag_pwr_off_thresh) {
             allOff();
             maskPhaseInterrupts();
-            input = 0;
-            running = 0;
         }
     }
     // Assume demag for next cycle; cleared if zero cross is found
