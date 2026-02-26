@@ -6,7 +6,7 @@ typedef union EEprom_u {
     struct {
         uint8_t reserved_0; //0
         uint8_t eeprom_version; //1
-        uint8_t reserved_1; //2
+        uint8_t demag_comp; //2 - demag compensation: 1=off(255), 2=low(160), 3=high(130)
         struct {        
             uint8_t major; //3
             uint8_t minor; //4
