@@ -30,9 +30,9 @@ can desynchronise and lose torque or stall.
 The user-configurable `demag_comp` EEPROM setting maps to `demag_pwr_off_thresh` at startup:
 
 ```c
-demag_pwr_off_thresh = 255; // default: compensation off
-if (eepromBuffer.demag_comp == 2) {
-    demag_pwr_off_thresh = 160; // low compensation
+demag_pwr_off_thresh = 160; // default: low compensation
+if (eepromBuffer.demag_comp == 1) {
+    demag_pwr_off_thresh = 255; // off
 } else if (eepromBuffer.demag_comp == 3) {
     demag_pwr_off_thresh = 130; // high compensation
 }
@@ -40,8 +40,8 @@ if (eepromBuffer.demag_comp == 2) {
 
 | `demag_comp` | `demag_pwr_off_thresh` | Effect |
 |---|---|---|
-| 1 (default) | 255 | Compensation disabled |
-| 2 | 160 | Low sensitivity – cuts power only under significant demag |
+| 1 | 255 | Compensation disabled |
+| 2 (default) | 160 | Low sensitivity – cuts power only under significant demag |
 | 3 | 130 | High sensitivity – cuts power earlier, protects more aggressively |
 
 ---
