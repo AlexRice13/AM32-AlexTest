@@ -19,7 +19,8 @@ typedef union EEprom_u {
         uint8_t current_I; //10 0-255
         uint8_t current_D; //11 0-255
         uint8_t active_brake_power; //12  1-5 percent duty cycle
-        char reserved_eeprom_3[4]; //13-16  
+        uint8_t demag_comp;              // 13: Demag compensation level (0 or 1=Off, 2=Low, 3=High)
+        char reserved_eeprom_3[3];       // 14-16
         uint8_t dir_reversed; // 17
         uint8_t bi_direction; // 18
         uint8_t use_sine_start; // 19

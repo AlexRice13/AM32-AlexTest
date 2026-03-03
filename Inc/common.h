@@ -30,6 +30,13 @@ extern uint16_t battery_voltage;
 extern int16_t actual_current;
 extern uint16_t e_rpm;
 extern uint32_t average_interval;
+extern uint8_t demag_detected_metric;
+extern uint8_t demag_detected_metric_max;
+extern uint8_t demag_pwr_off_thresh;
+extern uint8_t flag_demag_detected;
+extern uint8_t flag_demag_notify;
+extern uint8_t flag_desync_notify;
+extern uint8_t flag_stall_notify;
 
 
 #ifdef STMICRO

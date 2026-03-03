@@ -26,6 +26,8 @@ typedef struct {
     uint16_t temp_count;
     uint16_t voltage_count;
     uint16_t current_count;
+    uint16_t demag_count;
+    uint16_t status_count;
     uint8_t last_sent_extended;
 } dshot_telem_scheduler_t;
 
@@ -37,9 +39,19 @@ static dshot_telem_scheduler_t telem_scheduler = {0};
 // - Current: every 40 calls (20Hz at 800Hz input)
 // - eRPM: fills all other slots
 
-#define TEMP_EDT_RATE_DIVISOR    200
-#define VOLTAGE_EDT_RATE_DIVISOR 200
-#define CURRENT_EDT_RATE_DIVISOR 40
+#define TEMP_EDT_RATE_DIVISOR       200
+#define VOLTAGE_EDT_RATE_DIVISOR    200
+#define CURRENT_EDT_RATE_DIVISOR    40
+#define DEMAG_EDT_RATE_DIVISOR      5
+#define STATUS_EDT_RATE_DIVISOR     50
+#define DEMAG_METRIC_MIN            120  // baseline floor for demag metric
+#define DEMAG_COMPRESSION_DIVISOR   9    // compress [120..255] range into [0..15] (4-bit)
+
+extern uint8_t demag_detected_metric;
+extern uint8_t demag_detected_metric_max;
+extern uint8_t flag_demag_notify;
+extern uint8_t flag_desync_notify;
+extern uint8_t flag_stall_notify;
 
 
 char send_EDT_init;
@@ -252,6 +264,8 @@ void make_dshot_package(uint16_t com_time)
             telem_scheduler.current_count++;
             telem_scheduler.voltage_count++;
             telem_scheduler.temp_count++;
+            telem_scheduler.demag_count++;
+            telem_scheduler.status_count++;
 
             if (telem_scheduler.current_count >= CURRENT_EDT_RATE_DIVISOR) {
                 extended_frame_to_send = 0b0110 << 8 | (uint8_t)(actual_current / 50);
@@ -264,6 +278,29 @@ void make_dshot_package(uint16_t com_time)
             else if (telem_scheduler.temp_count >= TEMP_EDT_RATE_DIVISOR) {
                 extended_frame_to_send = 0b0010 << 8 | degrees_celsius;
                 telem_scheduler.temp_count = 0;
+            }
+            else if (telem_scheduler.demag_count >= DEMAG_EDT_RATE_DIVISOR) {
+                extended_frame_to_send = 0b1100 << 8 | demag_detected_metric;
+                telem_scheduler.demag_count = 0;
+            }
+            else if (telem_scheduler.status_count >= STATUS_EDT_RATE_DIVISOR) {
+                // compress demag_detected_metric_max from [120..255] to [0..15] (4-bit)
+                uint8_t compressed_max = 0;
+                if (demag_detected_metric_max > DEMAG_METRIC_MIN) {
+                    compressed_max = (demag_detected_metric_max - DEMAG_METRIC_MIN) / DEMAG_COMPRESSION_DIVISOR;
+                    if (compressed_max > 15) compressed_max = 15;
+                }
+                // pack: bit7=demag_notify, bit6=desync_notify, bit5=stall_notify, bits[3:0]=compressed_max
+                uint8_t status_byte = compressed_max;
+                if (flag_demag_notify)  status_byte |= 0x80;
+                if (flag_desync_notify) status_byte |= 0x40;
+                if (flag_stall_notify)  status_byte |= 0x20;
+                // clear notification flags after packing
+                flag_demag_notify = 0;
+                flag_desync_notify = 0;
+                flag_stall_notify = 0;
+                extended_frame_to_send = 0b1110 << 8 | status_byte;
+                telem_scheduler.status_count = 0;
             }
         }
     }

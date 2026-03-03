@@ -530,6 +530,13 @@ uint16_t adjusted_duty_cycle;
 
 uint8_t bad_count = 0;
 uint8_t bad_count_threshold = CPU_FREQUENCY_MHZ / 24;
+uint8_t demag_detected_metric = 120;
+uint8_t demag_detected_metric_max = 120;
+uint8_t demag_pwr_off_thresh = 255;
+uint8_t flag_demag_detected = 0;
+uint8_t flag_demag_notify = 0;
+uint8_t flag_desync_notify = 0;
+uint8_t flag_stall_notify = 0;
 uint8_t dshotcommand;
 uint16_t armed_count_threshold = 1000;
 
@@ -589,6 +596,60 @@ int32_t doPidCalculations(struct fastPID* pidnow, int actual, int target)
     return pidnow->pid_output;
 }
 
+static void decode_demag_comp_setting(void)
+{
+    demag_pwr_off_thresh = 255; // default: off
+    if (eepromBuffer.demag_comp == 2) {
+        demag_pwr_off_thresh = 160; // low compensation
+    } else if (eepromBuffer.demag_comp == 3) {
+        demag_pwr_off_thresh = 130; // high compensation
+    }
+}
+
+static void updateDemagMetric(void)
+{
+    // Exponential moving average: new = (old * 7 + event) / 8
+    uint16_t temp = (uint16_t)demag_detected_metric * 7;
+    if (flag_demag_detected) {
+        temp += 255;           // demag event contributes max weight
+        flag_demag_notify = 1; // notify EDT telemetry
+    }
+    demag_detected_metric = (uint8_t)(temp >> 3); // divide by 8
+
+    // clamp minimum to 120 (baseline floor)
+    if (demag_detected_metric < 120) {
+        demag_detected_metric = 120;
+    }
+
+    // update session peak
+    if (demag_detected_metric > demag_detected_metric_max) {
+        demag_detected_metric_max = demag_detected_metric;
+    }
+
+    // threshold check: if metric exceeds power-off threshold, cut power
+    if (demag_detected_metric >= demag_pwr_off_thresh) {
+        flag_desync_notify = 1;
+        allOff();
+        running = 0;
+    }
+}
+
+static inline void adjust_comm_timing(void)
+{
+    // only adjust if demag compensation is enabled
+    if (demag_pwr_off_thresh == 255) {
+        return; // compensation disabled
+    }
+
+    if (demag_detected_metric < 130) {
+        return; // below first threshold, no adjustment needed
+    }
+
+    // proportional reduction of advance based on (metric - 120)
+    uint16_t reduction = (uint16_t)(((uint32_t)(demag_detected_metric - 120) * advance) >> 7);
+    advance = (reduction < advance) ? advance - reduction : 0;
+}
+
 void loadEEpromSettings()
 {
     read_flash_bin(eepromBuffer.buffer, eeprom_address, sizeof(eepromBuffer.buffer));
@@ -601,10 +662,10 @@ void loadEEpromSettings()
       eepromBuffer.current_I = 0; // 0-255
       eepromBuffer.current_D = 100; // 0-255
       eepromBuffer.active_brake_power = 0; // 1-5 percent duty cycle
-      eepromBuffer.reserved_eeprom_3[0] = 0; //14-16  for crsf input
+      eepromBuffer.demag_comp = 0;
+      eepromBuffer.reserved_eeprom_3[0] = 0;
       eepromBuffer.reserved_eeprom_3[1] = 0;
       eepromBuffer.reserved_eeprom_3[2] = 0;
-      eepromBuffer.reserved_eeprom_3[3] = 0;
     }
     // eepromBuffer.advance_level can either be set to 0-3 with config tools less than 1.90 or 10-42 with 1.90 or above 
     if (eepromBuffer.advance_level > 42 || (eepromBuffer.advance_level < 10 && eepromBuffer.advance_level > 3)){
@@ -771,6 +832,7 @@ void loadEEpromSettings()
         high_rpm_level = motor_kv / 12 / (32 / eepromBuffer.motor_poles);				
     }
     reverse_speed_threshold = map(motor_kv, 300, 3000, 1000, 500);
+    decode_demag_comp_setting();
     if (eepromBuffer.bi_direction){
       polling_mode_changeover = POLLING_MODE_THRESHOLD / 2;
     }else{
@@ -799,6 +861,7 @@ uint16_t getSmoothedCurrent()
 void getBemfState()
 {
     uint8_t current_state = 0;
+    flag_demag_detected = 1; // assume demag until comparator confirms normal
 #if defined(MCU_F031) || defined(MCU_G031)
     if (step == 1 || step == 4) {
         current_state = PHASE_C_EXTI_PORT->IDR & PHASE_C_EXTI_PIN;
@@ -814,6 +877,7 @@ void getBemfState()
 #endif
     if (rising) {
         if (current_state) {
+            flag_demag_detected = 0; // BEMF is normal, no demag this cycle
             bemfcounter++;
         } else {
             bad_count++;
@@ -823,6 +887,7 @@ void getBemfState()
         }
     } else {
         if (!current_state) {
+            flag_demag_detected = 0; // BEMF is normal, no demag this cycle
             bemfcounter++;
         } else {
             bad_count++;
@@ -878,6 +943,7 @@ void commutate()
 void PeriodElapsedCallback()
 {
     DISABLE_COM_TIMER_INT(); // disable interrupt
+    updateDemagMetric();     // process demag metric for this commutation cycle
     commutate();
     commutation_interval = ((commutation_interval)+((lastzctime + thiszctime) >> 1))>>1;
   	if (!eepromBuffer.auto_advance) {
@@ -885,6 +951,7 @@ void PeriodElapsedCallback()
 	} else {
 	  advance = (commutation_interval * auto_advance_level) >> 6; // 60 divde 64 0.9375 degree increments
     }
+    adjust_comm_timing();    // adjust advance based on demag metric
     waitTime = (commutation_interval >> 1) - advance;
     if (!old_routine) {
         enableCompInterrupts(); // enable comp interrupt
