@@ -1996,13 +1996,11 @@ if(zero_crosses < 5){
             if ((getAbsDif(last_average_interval, average_interval) > average_interval >> 1) && (average_interval < 2000)) { // throttle resitricted before zc 20.
                 zero_crosses = 0;
                 desync_happened++;
+                flag_demag_detected = 1; // keep flag set so demag metric tracks desync events
                 if ((!eepromBuffer.bi_direction && (input > 47)) || commutation_interval > 1000) {
                     running = 0;
                 }
                 old_routine = 1;
-                if (zero_crosses > 100) {
-                    average_interval = 5000;
-                }
                 last_duty_cycle = min_startup_duty / 2;
             }
             desync_check = 0;
