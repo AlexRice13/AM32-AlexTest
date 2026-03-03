@@ -76,21 +76,44 @@ default** for the upcoming cycle — it will be cleared only if a zero cross is 
 
 ---
 
-## Power cut on heavy demag
+## Power cut and step skipping on heavy demag
 
 Immediately after the metric update, if the metric exceeds the user threshold, all FETs are
-turned off and phase interrupts are masked:
+turned off, phase interrupts are masked, and a number of **extra commutation steps to skip** is
+calculated based on how far the metric exceeds the threshold:
 
 ```c
 if (demag_metric > demag_pwr_off_thresh) {
     allOff();
     maskPhaseInterrupts();
+    // Skip 1 or more extra commutation steps based on demag severity.
+    // Each 32 counts above the threshold adds one extra skip, capped at 2.
+    uint8_t excess = demag_metric - demag_pwr_off_thresh;
+    extra_steps = excess >> 5;
+    if (extra_steps > 2) extra_steps = 2;
 }
 ```
 
-Power is restored automatically in the same call to `commutate()` when `comStep(step)` applies
-the next commutation phase, and `changeCompInput()` re-enables BEMF zero-cross sensing.
-The motor freewheels momentarily, then self-resynchronises via back-EMF tracking.
+After the normal single-step advance (step+1 / step-1), any extra skips are applied:
+
+```c
+while (extra_steps > 0) {
+    // advance step one more position in the same direction
+    ...
+    extra_steps--;
+}
+```
+
+| `demag_metric − demag_pwr_off_thresh` | `extra_steps` | Total step advance |
+|---|---|---|
+| 1 – 31 | 0 | 1 step (normal) |
+| 32 – 63 | 1 | 2 steps |
+| 64 – 95 | 2 | 3 steps |
+| ≥ 96 | 2 (capped) | 3 steps |
+
+Power is restored automatically in the same call to `commutate()`: `comStep(step)` applies the
+new (post-skip) commutation phase, and `changeCompInput()` re-enables BEMF zero-cross sensing.
+The motor freewheels briefly, then self-resynchronises via back-EMF tracking on the advanced step.
 
 ---
 
@@ -160,15 +183,19 @@ The flight controller can use this value to monitor motor health in real time.
 ```
 Each commutation (commutate()):
   1. Compute EMA:  demag_metric ← (demag_metric×7 + event×256) / 8, clamped ≥ 120
-  2. If demag_metric > demag_pwr_off_thresh → allOff()  (brief freewheel)
-  3. Apply next commutation step (restores power)
-  4. Set flag_demag_detected = 1  (pessimistic default for next cycle)
+  2. If demag_metric > demag_pwr_off_thresh:
+       a. allOff()  (brief freewheel)
+       b. extra_steps = (demag_metric − thresh) >> 5, capped at 2
+  3. Set flag_demag_detected = 1  (pessimistic default for next cycle)
+  4. Advance step by 1 (normal) + extra_steps (demag skip) in the motor direction
+  5. comStep(step) — restore power on the new step   (motor auto-continues)
+  6. changeCompInput() — re-enable BEMF zero-cross sensing on the new step
 
 Between commutations:
   - If a zero cross is found  →  flag_demag_detected = 0
   - If timeout or desync      →  flag_demag_detected stays / is set to 1
 
 After commutation timer fires (PeriodElapsedCallback()):
-  5. adjust_comm_timing() — reduce advance angle proportionally to demag excess
-  6. Set waitTime = commutation_interval/2 − advance
+  7. adjust_comm_timing() — reduce advance angle proportionally to demag excess
+  8. Set waitTime = commutation_interval/2 − advance
 ```
