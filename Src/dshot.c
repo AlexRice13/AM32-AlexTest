@@ -272,8 +272,11 @@ void make_dshot_package(uint16_t com_time)
                 telem_scheduler.temp_count = 0;
             }
             else if (telem_scheduler.demag_count >= DEMAG_EDT_RATE_DIVISOR) {
-                // Frame ID 0x0C: demag metric frame, value in [120, 255]
-                extended_frame_to_send = 0b1100 << 8 | demag_metric;
+                // Frame ID 0x0C (EDT Debug [3]): demag activity level.
+                // Value = demag_metric - 120: 0 means no demag (healthy baseline),
+                // up to 135 means maximum demagnetization. Using the offset makes
+                // any demag activity immediately visible as a non-zero change.
+                extended_frame_to_send = 0b1100 << 8 | (uint8_t)(demag_metric - 120);
                 telem_scheduler.demag_count = 0;
                 flag_demag_notify = 0; // clear notify after reporting
             }

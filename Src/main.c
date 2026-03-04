@@ -848,7 +848,6 @@ void commutate()
 {
     // Update demag metric using 7/8 exponential moving average:
     // new = (old * 7 + event * 256) / 8, clamped to [120, 255]
-    uint8_t extra_steps = 0;
     {
         uint16_t metric = (uint16_t)demag_metric * 7;
         if (flag_demag_detected) {
@@ -870,13 +869,10 @@ void commutate()
         if (demag_metric > demag_pwr_off_thresh) {
             allOff();
             maskPhaseInterrupts();
-            // Skip 1 or more extra commutation steps based on demag severity.
-            // Each 32 counts above the threshold adds one extra skip, capped at 2.
-            uint8_t excess = demag_metric - demag_pwr_off_thresh;
-            extra_steps = excess >> 5;
-            if (extra_steps > 2) {
-                extra_steps = 2;
-            }
+            // Step-skip disabled: caused motor stall during flight testing.
+            // uint8_t excess = demag_metric - demag_pwr_off_thresh;
+            // uint8_t extra_steps = excess >> 5;
+            // if (extra_steps > 2) { extra_steps = 2; }
         }
     }
     // Assume demag for next cycle; cleared if zero cross is found
@@ -897,27 +893,19 @@ void commutate()
         }
         rising = !(step % 2);
     }
-    // Apply extra step skips proportional to demag severity.
-    // After this loop comStep(step) restores power and changeCompInput() re-enables
-    // BEMF zero-cross sensing so the motor automatically continues running.
-    while (extra_steps > 0) {
-        if (forward == 1) {
-            step++;
-            if (step > 6) {
-                step = 1;
-                desync_check = 1;
-            }
-            rising = step % 2;
-        } else {
-            step--;
-            if (step < 1) {
-                step = 6;
-                desync_check = 1;
-            }
-            rising = !(step % 2);
-        }
-        extra_steps--;
-    }
+    // Step-skip loop disabled: caused motor stall during flight testing.
+    // while (extra_steps > 0) {
+    //     if (forward == 1) {
+    //         step++;
+    //         if (step > 6) { step = 1; desync_check = 1; }
+    //         rising = step % 2;
+    //     } else {
+    //         step--;
+    //         if (step < 1) { step = 6; desync_check = 1; }
+    //         rising = !(step % 2);
+    //     }
+    //     extra_steps--;
+    // }
 #ifdef INVERTED_EXTI
     rising = !rising;
 #endif
@@ -972,7 +960,7 @@ void PeriodElapsedCallback()
 	} else {
 	  advance = (commutation_interval * auto_advance_level) >> 6; // 60 divde 64 0.9375 degree increments
     }
-    adjust_comm_timing(); // reduce advance proportionally to demag metric excess
+    //adjust_comm_timing(); // disabled: auto timing adjust caused motor stall during flight testing
     waitTime = (commutation_interval >> 1) - advance;
     if (!old_routine) {
         enableCompInterrupts(); // enable comp interrupt

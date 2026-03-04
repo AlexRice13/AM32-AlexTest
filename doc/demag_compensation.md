@@ -76,72 +76,39 @@ default** for the upcoming cycle — it will be cleared only if a zero cross is 
 
 ---
 
-## Power cut and step skipping on heavy demag
+## Power cut on heavy demag (step skipping disabled)
 
 Immediately after the metric update, if the metric exceeds the user threshold, all FETs are
-turned off, phase interrupts are masked, and a number of **extra commutation steps to skip** is
-calculated based on how far the metric exceeds the threshold:
+turned off and phase interrupts are masked:
 
 ```c
 if (demag_metric > demag_pwr_off_thresh) {
     allOff();
     maskPhaseInterrupts();
-    // Skip 1 or more extra commutation steps based on demag severity.
-    // Each 32 counts above the threshold adds one extra skip, capped at 2.
-    uint8_t excess = demag_metric - demag_pwr_off_thresh;
-    extra_steps = excess >> 5;
-    if (extra_steps > 2) extra_steps = 2;
+    // Step-skip disabled: caused motor stall during flight testing.
+    // uint8_t excess = demag_metric - demag_pwr_off_thresh;
+    // uint8_t extra_steps = excess >> 5;
+    // if (extra_steps > 2) { extra_steps = 2; }
 }
 ```
 
-After the normal single-step advance (step+1 / step-1), any extra skips are applied:
-
-```c
-while (extra_steps > 0) {
-    // advance step one more position in the same direction
-    ...
-    extra_steps--;
-}
-```
-
-| `demag_metric − demag_pwr_off_thresh` | `extra_steps` | Total step advance |
-|---|---|---|
-| 1 – 31 | 0 | 1 step (normal) |
-| 32 – 63 | 1 | 2 steps |
-| 64 – 95 | 2 | 3 steps |
-| ≥ 96 | 2 (capped) | 3 steps |
-
-Power is restored automatically in the same call to `commutate()`: `comStep(step)` applies the
-new (post-skip) commutation phase, and `changeCompInput()` re-enables BEMF zero-cross sensing.
-The motor freewheels briefly, then self-resynchronises via back-EMF tracking on the advanced step.
+> **Note:** The extra commutation step-skip feature (which skipped 1–2 extra steps based on
+> demag severity) was disabled after flight testing revealed it caused motor stall and prevented
+> acceleration. Power is cut briefly and then restored by `comStep(step)` + `changeCompInput()`
+> in the same `commutate()` call.
 
 ---
 
-## Advance timing reduction — `adjust_comm_timing()`
+## Advance timing reduction — `adjust_comm_timing()` (disabled)
 
-Even when demag does not reach the power-cut threshold, elevated demag causes commutation to
-happen too early (the advance angle is too large), which worsens the problem.
-`adjust_comm_timing()` reduces the advance angle proportionally to how far `demag_metric`
-exceeds the healthy baseline (120):
+`adjust_comm_timing()` was designed to reduce the advance angle proportionally when demag is
+elevated. It was **disabled** after flight testing revealed it caused motor stall:
 
 ```c
-static inline void adjust_comm_timing(void)
-{
-    if (demag_pwr_off_thresh >= 255 || demag_metric <= 120) return;
-    uint16_t reduction = (uint16_t)(((uint32_t)(demag_metric - 120) * advance) >> 7);
-    advance = (reduction < advance) ? advance - reduction : 0;
-}
+//adjust_comm_timing(); // disabled: auto timing adjust caused motor stall during flight testing
 ```
 
-| `demag_metric` | Reduction of `advance` |
-|---|---|
-| 120 | 0 % |
-| 184 | ~50 % |
-| 248 | ~100 % |
-| 255 | 100 % (floored at 0) |
-
-This function is called in `PeriodElapsedCallback()` after `advance` is computed and before
-`waitTime` is set.
+The function definition is retained in the source for future reference.
 
 ---
 
@@ -166,15 +133,19 @@ This function is called in `PeriodElapsedCallback()` after `advance` is computed
 
 ## EDT telemetry reporting
 
-When DShot Extended Telemetry (EDT) is active, `demag_metric` is periodically reported on
-frame ID `0x0C` and `flag_demag_notify` is cleared:
+When DShot Extended Telemetry (EDT) is active, the demag activity level is periodically
+reported on frame ID `0x0C` (EDT Debug [3]):
 
 ```c
-extended_frame_to_send = 0b1100 << 8 | demag_metric;
+// Value = demag_metric - 120: 0 = healthy baseline, up to 135 = maximum demag activity
+extended_frame_to_send = 0b1100 << 8 | (uint8_t)(demag_metric - 120);
 flag_demag_notify = 0; // clear notify after reporting
 ```
 
-The flight controller can use this value to monitor motor health in real time.
+The value is offset so that **0 = no demag activity** (healthy motor) and positive values
+indicate active demagnetization. This makes changes immediately visible in the flight
+controller's blackbox (the value is 0 during normal operation and only rises when demag
+is detected).
 
 ---
 
@@ -185,9 +156,9 @@ Each commutation (commutate()):
   1. Compute EMA:  demag_metric ← (demag_metric×7 + event×256) / 8, clamped ≥ 120
   2. If demag_metric > demag_pwr_off_thresh:
        a. allOff()  (brief freewheel)
-       b. extra_steps = (demag_metric − thresh) >> 5, capped at 2
+       [Step-skip disabled: was causing motor stall during flight]
   3. Set flag_demag_detected = 1  (pessimistic default for next cycle)
-  4. Advance step by 1 (normal) + extra_steps (demag skip) in the motor direction
+  4. Advance step by 1 in the motor direction
   5. comStep(step) — restore power on the new step   (motor auto-continues)
   6. changeCompInput() — re-enable BEMF zero-cross sensing on the new step
 
@@ -196,6 +167,6 @@ Between commutations:
   - If timeout or desync      →  flag_demag_detected stays / is set to 1
 
 After commutation timer fires (PeriodElapsedCallback()):
-  7. adjust_comm_timing() — reduce advance angle proportionally to demag excess
-  8. Set waitTime = commutation_interval/2 − advance
+  [adjust_comm_timing() disabled: was causing motor stall during flight]
+  7. Set waitTime = commutation_interval/2 − advance
 ```
