@@ -455,6 +455,8 @@ uint16_t readings[50];
 
 uint8_t demag_metric = 0;         // sliding avg of demag events [0, 255]
 uint8_t demag_metric_max = 0;     // session maximum of demag_metric
+volatile uint8_t demag_metric_edt = 0; // peak demag_metric since last EDT frame (reset by EDT sender;
+                                       // written from ISR context — single-byte write is atomic on Cortex-M)
 uint8_t demag_pwr_off_thresh = 255; // power cutoff threshold (255=off, 160=low, 130=high)
 uint8_t flag_demag_detected = 0;  // 1 if current cycle had a demag event
 uint8_t flag_demag_notify = 0;    // set when demag event occurs (for EDT status)
@@ -858,6 +860,9 @@ void commutate()
         demag_metric = (uint8_t)metric;
         if (demag_metric > demag_metric_max) {
             demag_metric_max = demag_metric;
+        }
+        if (demag_metric > demag_metric_edt) {
+            demag_metric_edt = demag_metric;
         }
         // If demag metric exceeds threshold, cut power temporarily (demag compensation).
         // Re-synchronization is automatic: comStep(step) below applies the new commutation

@@ -132,24 +132,40 @@ The function definition is retained in the source for future reference.
 
 ## EDT telemetry reporting
 
-When DShot Extended Telemetry (EDT) is active, the demag activity level is reported on
-frame ID `0x0C` (EDT Debug [3]) whenever `flag_demag_notify` is set (i.e., a demag event
-occurred since the last report) and the scheduler rate divisor has elapsed:
+When DShot Extended Telemetry (EDT) is active, frame ID `0x0C` (EDT Debug [3]) is sent
+**periodically** on every `DEMAG_EDT_RATE_DIVISOR` scheduler tick. The value transmitted is
+the **peak `demag_metric`** observed since the previous EDT demag frame was sent, captured
+in the `demag_metric_edt` accumulator.
+
+### How the peak accumulator works
+
+In `commutate()` (called on every commutation), `demag_metric_edt` is updated whenever the
+current EMA value exceeds the running peak for this reporting window:
 
 ```c
-telem_scheduler.demag_count = 0; // always reset to prevent counter overflow
-if (flag_demag_notify) {
-    // Capture demag_metric into the frame BEFORE clearing the notify flag
-    // to guarantee the value is read before any potential zero-clear.
-    extended_frame_to_send = 0b1100 << 8 | demag_metric;
-    flag_demag_notify = 0; // clear only after capture
+if (demag_metric > demag_metric_edt) {
+    demag_metric_edt = demag_metric;
 }
 ```
 
-The value ranges from **0** (healthy motor, no demag activity) to **255** (maximum
-demagnetization). Sending only when `flag_demag_notify` is set means a frame is only
-emitted when a real demag event has occurred; the counter is always reset to prevent
-`uint16_t` overflow regardless.
+In `make_dshot_package()`, when the scheduler period elapses, the peak is captured into the
+EDT frame and then the accumulator is reset atomically (interrupts briefly disabled to
+prevent `commutate()` from updating the peak between the read and the zero-write):
+
+```c
+__disable_irq();
+extended_frame_to_send = 0b1100 << 8 | demag_metric_edt;
+demag_metric_edt = 0;
+__enable_irq();
+telem_scheduler.demag_count = 0;
+```
+
+This guarantees:
+- The EDT frame is sent on every tick regardless of whether a demag event occurred (the
+  flight controller always receives an up-to-date value).
+- The reported value represents the **worst-case** demag activity seen in that window, not
+  a snapshot at an arbitrary moment.
+- The capture assignment happens strictly before the accumulator reset.
 
 ---
 
@@ -158,13 +174,15 @@ emitted when a real demag event has occurred; the counter is always reset to pre
 ```
 Each commutation (commutate()):
   1. Compute EMA:  demag_metric ← (demag_metric×7 + event×256) / 8, range [0, 255]
-  2. If demag_metric > demag_pwr_off_thresh:
+  2. Update peak:  demag_metric_edt ← max(demag_metric_edt, demag_metric)
+  3. Update max:   demag_metric_max ← max(demag_metric_max, demag_metric)
+  4. If demag_metric > demag_pwr_off_thresh:
        a. allOff()  (brief freewheel)
        [Step-skip disabled: was causing motor stall during flight]
-  3. Set flag_demag_detected = 1  (pessimistic default for next cycle)
-  4. Advance step by 1 in the motor direction
-  5. comStep(step) — restore power on the new step   (motor auto-continues)
-  6. changeCompInput() — re-enable BEMF zero-cross sensing on the new step
+  5. Set flag_demag_detected = 1  (pessimistic default for next cycle)
+  6. Advance step by 1 in the motor direction
+  7. comStep(step) — restore power on the new step   (motor auto-continues)
+  8. changeCompInput() — re-enable BEMF zero-cross sensing on the new step
 
 Between commutations:
   - If a zero cross is found  →  flag_demag_detected = 0
@@ -172,5 +190,9 @@ Between commutations:
 
 After commutation timer fires (PeriodElapsedCallback()):
   [adjust_comm_timing() disabled: was causing motor stall during flight]
-  7. Set waitTime = commutation_interval/2 − advance
+  9. Set waitTime = commutation_interval/2 − advance
+
+Each DEMAG_EDT_RATE_DIVISOR DShot frames (make_dshot_package()):
+  10. EDT 0x0C frame = demag_metric_edt (peak since last EDT frame)
+  11. demag_metric_edt ← 0   (reset for the next window)
 ```

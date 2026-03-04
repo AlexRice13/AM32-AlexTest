@@ -55,7 +55,7 @@ extern int zero_crosses;
 extern char send_telemetry;
 extern uint8_t max_duty_cycle_change;
 extern uint8_t demag_metric;
-extern uint8_t flag_demag_notify;
+extern volatile uint8_t demag_metric_edt;
 int dshot_full_number;
 extern char play_tone_flag;
 extern char send_esc_info_flag;
@@ -272,13 +272,13 @@ void make_dshot_package(uint16_t com_time)
                 telem_scheduler.temp_count = 0;
             }
             else if (telem_scheduler.demag_count >= DEMAG_EDT_RATE_DIVISOR) {
-                telem_scheduler.demag_count = 0; // always reset to prevent counter overflow
-                if (flag_demag_notify) {
-                    // Capture demag_metric into the frame BEFORE clearing the notify flag
-                    // to guarantee the value is read before any potential zero-clear.
-                    extended_frame_to_send = 0b1100 << 8 | demag_metric;
-                    flag_demag_notify = 0; // clear only after capture
-                }
+                // Atomically capture the peak and reset the accumulator so that a
+                // commutation interrupt between capture and reset cannot cause a lost update.
+                __disable_irq();
+                extended_frame_to_send = 0b1100 << 8 | demag_metric_edt;
+                demag_metric_edt = 0;
+                __enable_irq();
+                telem_scheduler.demag_count = 0;
             }
         }
     }
