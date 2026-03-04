@@ -17,7 +17,7 @@ can desynchronise and lose torque or stall.
 
 | Variable | Type | Description |
 |---|---|---|
-| `demag_metric` | `uint8_t` | Sliding exponential average of demag events. Range: **120** (healthy) … **255** (heavy demag). |
+| `demag_metric` | `uint8_t` | Sliding exponential average of demag events. Range: **0** (healthy) … **255** (heavy demag). |
 | `demag_metric_max` | `uint8_t` | Highest `demag_metric` value seen since power-on; never decreases. |
 | `demag_pwr_off_thresh` | `uint8_t` | Power-cutoff threshold. If `demag_metric` exceeds this value during commutation, drive power is cut briefly. **255** = compensation disabled. |
 | `flag_demag_detected` | `uint8_t` | Set to **1** at the start of each commutation cycle (pessimistic assumption). Cleared to **0** if a valid zero-cross is found before the next commutation. |
@@ -58,7 +58,7 @@ new = (old × 7  +  event × 256) / 8
 - If `flag_demag_detected == 1` (no zero cross was found in the previous cycle),
   `event = 1` → the metric is pushed toward **255**.
 - If `flag_demag_detected == 0` (a zero cross was found), `event = 0` → the metric
-  decays back toward **120** (the floor clamp).
+  decays back toward **0** (natural lower bound for `uint8_t`).
 
 ```c
 uint16_t metric = (uint16_t)demag_metric * 7;
@@ -67,7 +67,6 @@ if (flag_demag_detected) {
     flag_demag_notify = 1;  // signal EDT telemetry
 }
 metric >>= 3;               // divide by 8
-if (metric < 120) metric = 120;  // floor clamp
 demag_metric = (uint8_t)metric;
 ```
 
@@ -137,15 +136,14 @@ When DShot Extended Telemetry (EDT) is active, the demag activity level is perio
 reported on frame ID `0x0C` (EDT Debug [3]):
 
 ```c
-// Value = demag_metric - 120: 0 = healthy baseline, up to 135 = maximum demag activity
-extended_frame_to_send = 0b1100 << 8 | (uint8_t)(demag_metric - 120);
+// demag_metric [0, 255]: 0 = healthy, 255 = maximum demagnetization
+extended_frame_to_send = 0b1100 << 8 | demag_metric;
 flag_demag_notify = 0; // clear notify after reporting
 ```
 
-The value is offset so that **0 = no demag activity** (healthy motor) and positive values
-indicate active demagnetization. This makes changes immediately visible in the flight
-controller's blackbox (the value is 0 during normal operation and only rises when demag
-is detected).
+The value ranges from **0** (healthy motor, no demag activity) to **255** (maximum
+demagnetization). This makes any demag activity immediately visible in the flight
+controller's blackbox.
 
 ---
 
@@ -153,7 +151,7 @@ is detected).
 
 ```
 Each commutation (commutate()):
-  1. Compute EMA:  demag_metric ← (demag_metric×7 + event×256) / 8, clamped ≥ 120
+  1. Compute EMA:  demag_metric ← (demag_metric×7 + event×256) / 8, range [0, 255]
   2. If demag_metric > demag_pwr_off_thresh:
        a. allOff()  (brief freewheel)
        [Step-skip disabled: was causing motor stall during flight]

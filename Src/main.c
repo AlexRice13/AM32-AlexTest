@@ -453,8 +453,8 @@ uint8_t readIndex = 0; // the index of the current reading
 uint32_t total = 0;
 uint16_t readings[50];
 
-uint8_t demag_metric = 120;       // sliding avg of demag events [120, 255]
-uint8_t demag_metric_max = 120;   // session maximum of demag_metric
+uint8_t demag_metric = 0;         // sliding avg of demag events [0, 255]
+uint8_t demag_metric_max = 0;     // session maximum of demag_metric
 uint8_t demag_pwr_off_thresh = 255; // power cutoff threshold (255=off, 160=low, 130=high)
 uint8_t flag_demag_detected = 0;  // 1 if current cycle had a demag event
 uint8_t flag_demag_notify = 0;    // set when demag event occurs (for EDT status)
@@ -847,7 +847,7 @@ void getBemfState()
 void commutate()
 {
     // Update demag metric using 7/8 exponential moving average:
-    // new = (old * 7 + event * 256) / 8, clamped to [120, 255]
+    // new = (old * 7 + event * 256) / 8, range [0, 255]
     {
         uint16_t metric = (uint16_t)demag_metric * 7;
         if (flag_demag_detected) {
@@ -855,9 +855,6 @@ void commutate()
             flag_demag_notify = 1;
         }
         metric >>= 3; // divide by 8
-        if (metric < 120) {
-            metric = 120; // minimum clamp
-        }
         demag_metric = (uint8_t)metric;
         if (demag_metric > demag_metric_max) {
             demag_metric_max = demag_metric;
@@ -935,14 +932,14 @@ void commutate()
 // When demagnetization is elevated, the advance is reduced proportionally to
 // avoid commutating too early, which would worsen demag events.
 // Only active when demag compensation is enabled (demag_pwr_off_thresh < 255).
-// demag_metric range: 120 (healthy) to 255 (heavy demag); reduction scales
-// linearly from 0 at baseline up to ~100% of advance at metric=248+.
+// demag_metric range: 0 (healthy) to 255 (heavy demag); reduction scales
+// linearly from 0 at baseline up to ~100% of advance at metric=128+.
 static inline void adjust_comm_timing(void)
 {
-    if (demag_pwr_off_thresh >= 255 || demag_metric <= 120) {
+    if (demag_pwr_off_thresh >= 255 || demag_metric == 0) {
         return;
     }
-    uint16_t reduction = (uint16_t)(((uint32_t)(demag_metric - 120) * advance) >> 7);
+    uint16_t reduction = (uint16_t)(((uint32_t)demag_metric * advance) >> 8);
     if (reduction < advance) {
         advance -= reduction;
     } else {
