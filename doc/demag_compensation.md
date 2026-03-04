@@ -132,18 +132,24 @@ The function definition is retained in the source for future reference.
 
 ## EDT telemetry reporting
 
-When DShot Extended Telemetry (EDT) is active, the demag activity level is periodically
-reported on frame ID `0x0C` (EDT Debug [3]):
+When DShot Extended Telemetry (EDT) is active, the demag activity level is reported on
+frame ID `0x0C` (EDT Debug [3]) whenever `flag_demag_notify` is set (i.e., a demag event
+occurred since the last report) and the scheduler rate divisor has elapsed:
 
 ```c
-// demag_metric [0, 255]: 0 = healthy, 255 = maximum demagnetization
-extended_frame_to_send = 0b1100 << 8 | demag_metric;
-flag_demag_notify = 0; // clear notify after reporting
+telem_scheduler.demag_count = 0; // always reset to prevent counter overflow
+if (flag_demag_notify) {
+    // Capture demag_metric into the frame BEFORE clearing the notify flag
+    // to guarantee the value is read before any potential zero-clear.
+    extended_frame_to_send = 0b1100 << 8 | demag_metric;
+    flag_demag_notify = 0; // clear only after capture
+}
 ```
 
 The value ranges from **0** (healthy motor, no demag activity) to **255** (maximum
-demagnetization). This makes any demag activity immediately visible in the flight
-controller's blackbox.
+demagnetization). Sending only when `flag_demag_notify` is set means a frame is only
+emitted when a real demag event has occurred; the counter is always reset to prevent
+`uint16_t` overflow regardless.
 
 ---
 

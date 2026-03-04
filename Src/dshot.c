@@ -272,11 +272,13 @@ void make_dshot_package(uint16_t com_time)
                 telem_scheduler.temp_count = 0;
             }
             else if (telem_scheduler.demag_count >= DEMAG_EDT_RATE_DIVISOR) {
-                // Frame ID 0x0C (EDT Debug [3]): demag activity level [0, 255].
-                // 0 = healthy (no demag), 255 = maximum demagnetization.
-                extended_frame_to_send = 0b1100 << 8 | demag_metric;
-                telem_scheduler.demag_count = 0;
-                flag_demag_notify = 0; // clear notify after reporting
+                telem_scheduler.demag_count = 0; // always reset to prevent counter overflow
+                if (flag_demag_notify) {
+                    // Capture demag_metric into the frame BEFORE clearing the notify flag
+                    // to guarantee the value is read before any potential zero-clear.
+                    extended_frame_to_send = 0b1100 << 8 | demag_metric;
+                    flag_demag_notify = 0; // clear only after capture
+                }
             }
         }
     }
