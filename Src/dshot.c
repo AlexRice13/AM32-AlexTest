@@ -260,24 +260,19 @@ void make_dshot_package(uint16_t com_time)
             telem_scheduler.temp_count++;
             telem_scheduler.demag_count++;
 
-            if (telem_scheduler.current_count >= CURRENT_EDT_RATE_DIVISOR) {
-                extended_frame_to_send = 0b0110 << 8 | (uint8_t)(actual_current / 50);
-                telem_scheduler.current_count = 0;
-            }
-            else if (telem_scheduler.demag_count >= DEMAG_EDT_RATE_DIVISOR) {
-                // Demag checked before voltage/temp (divisor 128 < 200) to prevent
-                // priority inversion — voltage/temp must not delay a more-frequent type.
-                // Atomically capture the peak and reset the accumulator so that a
-                // commutation interrupt between capture and reset cannot cause a lost update.
-                __disable_irq();
+            // if (telem_scheduler.current_count >= CURRENT_EDT_RATE_DIVISOR) {
+            //     extended_frame_to_send = 0b0110 << 8 | (uint8_t)(actual_current / 50);
+            //     telem_scheduler.current_count = 0;
+            // }
+            // else if (telem_scheduler.voltage_count >= VOLTAGE_EDT_RATE_DIVISOR) {
+            //     extended_frame_to_send = 0b0100 << 8 | (uint8_t)(battery_voltage / 25);
+            //     telem_scheduler.voltage_count = 0;
+            // }
+            // else
+            if (telem_scheduler.demag_count >= DEMAG_EDT_RATE_DIVISOR) {
                 extended_frame_to_send = 0b1100 << 8 | demag_metric_edt;
                 demag_metric_edt = 0;
-                __enable_irq();
                 telem_scheduler.demag_count = 0;
-            }
-            else if (telem_scheduler.voltage_count >= VOLTAGE_EDT_RATE_DIVISOR) {
-                extended_frame_to_send = 0b0100 << 8 | (uint8_t)(battery_voltage / 25);
-                telem_scheduler.voltage_count = 0;
             }
             else if (telem_scheduler.temp_count >= TEMP_EDT_RATE_DIVISOR) {
                 extended_frame_to_send = 0b0010 << 8 | degrees_celsius;
