@@ -26,6 +26,7 @@ typedef struct {
     uint16_t temp_count;
     uint16_t voltage_count;
     uint16_t current_count;
+    uint16_t demag_count;
     uint8_t last_sent_extended;
 } dshot_telem_scheduler_t;
 
@@ -35,11 +36,13 @@ static dshot_telem_scheduler_t telem_scheduler = {0};
 // - Temperature: every 200 calls (4Hz at 800Hz input)
 // - Voltage: every 200 calls (4Hz at 800Hz input)
 // - Current: every 40 calls (20Hz at 800Hz input)
+// - Demag metric: every 128 calls (~6Hz at 800Hz input)
 // - eRPM: fills all other slots
 
 #define TEMP_EDT_RATE_DIVISOR    200
 #define VOLTAGE_EDT_RATE_DIVISOR 200
 #define CURRENT_EDT_RATE_DIVISOR 40
+#define DEMAG_EDT_RATE_DIVISOR   128
 
 
 char send_EDT_init;
@@ -51,6 +54,8 @@ uint32_t gcrnumber;
 extern int zero_crosses;
 extern char send_telemetry;
 extern uint8_t max_duty_cycle_change;
+extern uint8_t demag_metric;
+extern uint8_t flag_demag_notify;
 int dshot_full_number;
 extern char play_tone_flag;
 extern char send_esc_info_flag;
@@ -252,6 +257,7 @@ void make_dshot_package(uint16_t com_time)
             telem_scheduler.current_count++;
             telem_scheduler.voltage_count++;
             telem_scheduler.temp_count++;
+            telem_scheduler.demag_count++;
 
             if (telem_scheduler.current_count >= CURRENT_EDT_RATE_DIVISOR) {
                 extended_frame_to_send = 0b0110 << 8 | (uint8_t)(actual_current / 50);
@@ -264,6 +270,12 @@ void make_dshot_package(uint16_t com_time)
             else if (telem_scheduler.temp_count >= TEMP_EDT_RATE_DIVISOR) {
                 extended_frame_to_send = 0b0010 << 8 | degrees_celsius;
                 telem_scheduler.temp_count = 0;
+            }
+            else if (telem_scheduler.demag_count >= DEMAG_EDT_RATE_DIVISOR) {
+                // Frame ID 0x0C: demag metric frame, value in [120, 255]
+                extended_frame_to_send = 0b1100 << 8 | demag_metric;
+                telem_scheduler.demag_count = 0;
+                flag_demag_notify = 0; // clear notify after reporting
             }
         }
     }

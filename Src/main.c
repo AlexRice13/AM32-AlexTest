@@ -389,7 +389,6 @@ char lowkv = 0;
 
 uint16_t min_startup_duty = 120;
 uint16_t sin_mode_min_s_d = 120;
-char bemf_timeout = 10;
 
 char startup_boost = 50;
 char reversing_dead_band = 1;
@@ -454,7 +453,11 @@ uint8_t readIndex = 0; // the index of the current reading
 uint32_t total = 0;
 uint16_t readings[50];
 
-uint8_t bemf_timeout_happened = 0;
+uint8_t demag_metric = 120;       // sliding avg of demag events [120, 255]
+uint8_t demag_metric_max = 120;   // session maximum of demag_metric
+uint8_t demag_pwr_off_thresh = 255; // power cutoff threshold (255=off, 160=low, 130=high)
+uint8_t flag_demag_detected = 0;  // 1 if current cycle had a demag event
+uint8_t flag_demag_notify = 0;    // set when demag event occurs (for EDT status)
 uint8_t changeover_step = 5;
 uint8_t filter_level = 5;
 uint8_t running = 0;
@@ -616,6 +619,14 @@ void loadEEpromSettings()
     }
     if (eepromBuffer.advance_level < 43 && eepromBuffer.advance_level > 9 ) { // new format subtract 10 from advance
         temp_advance = eepromBuffer.advance_level - 10;
+    }
+
+    // Initialize demag compensation threshold
+    demag_pwr_off_thresh = 255; // default: compensation off
+    if (eepromBuffer.demag_comp == 2) {
+        demag_pwr_off_thresh = 160; // low compensation
+    } else if (eepromBuffer.demag_comp == 3) {
+        demag_pwr_off_thresh = 130; // high compensation
     }
 
     if (eepromBuffer.pwm_frequency < 145 && eepromBuffer.pwm_frequency > 7) {
@@ -835,6 +846,42 @@ void getBemfState()
 
 void commutate()
 {
+    // Update demag metric using 7/8 exponential moving average:
+    // new = (old * 7 + event * 256) / 8, clamped to [120, 255]
+    uint8_t extra_steps = 0;
+    {
+        uint16_t metric = (uint16_t)demag_metric * 7;
+        if (flag_demag_detected) {
+            metric += 256; // demag event: drive metric toward 255
+            flag_demag_notify = 1;
+        }
+        metric >>= 3; // divide by 8
+        if (metric < 120) {
+            metric = 120; // minimum clamp
+        }
+        demag_metric = (uint8_t)metric;
+        if (demag_metric > demag_metric_max) {
+            demag_metric_max = demag_metric;
+        }
+        // If demag metric exceeds threshold, cut power temporarily (demag compensation).
+        // Re-synchronization is automatic: comStep(step) below applies the new commutation
+        // phase (restoring power) and changeCompInput() re-enables BEMF zero-cross sensing.
+        // The motor freewheels briefly then self-resynchronizes via back-EMF tracking.
+        if (demag_metric > demag_pwr_off_thresh) {
+            allOff();
+            maskPhaseInterrupts();
+            // Skip 1 or more extra commutation steps based on demag severity.
+            // Each 32 counts above the threshold adds one extra skip, capped at 2.
+            uint8_t excess = demag_metric - demag_pwr_off_thresh;
+            extra_steps = excess >> 5;
+            if (extra_steps > 2) {
+                extra_steps = 2;
+            }
+        }
+    }
+    // Assume demag for next cycle; cleared if zero cross is found
+    flag_demag_detected = 1;
+
     if (forward == 1) {
         step++;
         if (step > 6) {
@@ -849,6 +896,27 @@ void commutate()
             desync_check = 1;
         }
         rising = !(step % 2);
+    }
+    // Apply extra step skips proportional to demag severity.
+    // After this loop comStep(step) restores power and changeCompInput() re-enables
+    // BEMF zero-cross sensing so the motor automatically continues running.
+    while (extra_steps > 0) {
+        if (forward == 1) {
+            step++;
+            if (step > 6) {
+                step = 1;
+                desync_check = 1;
+            }
+            rising = step % 2;
+        } else {
+            step--;
+            if (step < 1) {
+                step = 6;
+                desync_check = 1;
+            }
+            rising = !(step % 2);
+        }
+        extra_steps--;
     }
 #ifdef INVERTED_EXTI
     rising = !rising;
@@ -875,6 +943,25 @@ void commutate()
 #endif
 }
 
+// Adjust commutation advance timing based on the demag metric.
+// When demagnetization is elevated, the advance is reduced proportionally to
+// avoid commutating too early, which would worsen demag events.
+// Only active when demag compensation is enabled (demag_pwr_off_thresh < 255).
+// demag_metric range: 120 (healthy) to 255 (heavy demag); reduction scales
+// linearly from 0 at baseline up to ~100% of advance at metric=248+.
+static inline void adjust_comm_timing(void)
+{
+    if (demag_pwr_off_thresh >= 255 || demag_metric <= 120) {
+        return;
+    }
+    uint16_t reduction = (uint16_t)(((uint32_t)(demag_metric - 120) * advance) >> 7);
+    if (reduction < advance) {
+        advance -= reduction;
+    } else {
+        advance = 0;
+    }
+}
+
 void PeriodElapsedCallback()
 {
     DISABLE_COM_TIMER_INT(); // disable interrupt
@@ -885,6 +972,7 @@ void PeriodElapsedCallback()
 	} else {
 	  advance = (commutation_interval * auto_advance_level) >> 6; // 60 divde 64 0.9375 degree increments
     }
+    adjust_comm_timing(); // reduce advance proportionally to demag metric excess
     waitTime = (commutation_interval >> 1) - advance;
     if (!old_routine) {
         enableCompInterrupts(); // enable comp interrupt
@@ -919,6 +1007,7 @@ void interruptRoutine()
         }
     __disable_irq();
     maskPhaseInterrupts();
+    flag_demag_detected = 0; // zero cross found - no demag this cycle
     lastzctime = thiszctime;
     thiszctime = INTERVAL_TIMER_COUNT;  
     SET_INTERVAL_TIMER_COUNT(0);
@@ -1095,15 +1184,6 @@ void setInput()
         adjusted_input = newinput;
     }
 #ifndef BRUSHED_MODE
-    if ((bemf_timeout_happened > bemf_timeout) && eepromBuffer.stuck_rotor_protection) {
-        allOff();
-        maskPhaseInterrupts();
-        input = 0;
-        bemf_timeout_happened = 102;
-#ifdef USE_RGB_LED
-        setIndividualRGBLed(1, 0, 0);
-#endif
-    } else {
 #ifdef FIXED_DUTY_MODE
         input = FIXED_DUTY_MODE_POWER * 20 + 47;
 #else
@@ -1152,7 +1232,6 @@ void setInput()
             }
         }
 #endif
-    }
 #endif
 #ifndef BRUSHED_MODE
 if (!stepper_sine && armed) {
@@ -1560,6 +1639,7 @@ void advanceincrement()
 
 void zcfoundroutine()
 { // only used in polling mode, blocking routine.
+    flag_demag_detected = 0; // zero cross found - no demag this cycle
     thiszctime = INTERVAL_TIMER_COUNT;
     SET_INTERVAL_TIMER_COUNT(0);
     commutation_interval = (thiszctime + (3 * commutation_interval)) / 4;
@@ -1939,40 +2019,17 @@ if(zero_crosses < 5){
 
 #ifndef BRUSHED_MODE
 
-        if ((zero_crosses > 1000) || (adjusted_input == 0)) {
-            bemf_timeout_happened = 0;
-        }
-        if (zero_crosses > 100 && adjusted_input < 200) {
-            bemf_timeout_happened = 0;
-        }
-        if (eepromBuffer.use_sine_start && adjusted_input < 160) {
-            bemf_timeout_happened = 0;
-        }
-
-        if (crawler_mode) {
-            if (adjusted_input < 400) {
-                bemf_timeout_happened = 0;
-            }
-        } else {
-            if (adjusted_input < 150) { // startup duty cycle should be low enough to not burn motor
-                bemf_timeout = 100;
-            } else {
-                bemf_timeout = 10;
-            }
-        }
 #endif
         average_interval = e_com_time / 3;
         if (desync_check && zero_crosses > 10) {
             if ((getAbsDif(last_average_interval, average_interval) > average_interval >> 1) && (average_interval < 2000)) { // throttle resitricted before zc 20.
                 zero_crosses = 0;
                 desync_happened++;
+                flag_demag_detected = 1; // keep flag set so demag metric tracks desync events
                 if ((!eepromBuffer.bi_direction && (input > 47)) || commutation_interval > 1000) {
                     running = 0;
                 }
                 old_routine = 1;
-                if (zero_crosses > 100) {
-                    average_interval = 5000;
-                }
                 last_duty_cycle = min_startup_duty / 2;
             }
             desync_check = 0;
@@ -2139,7 +2196,8 @@ if(zero_crosses < 5){
             }
 #endif
             if (INTERVAL_TIMER_COUNT > 45000 && running == 1) {
-                bemf_timeout_happened++;
+                // Commutation timeout: mark as demag event
+                flag_demag_detected = 1;
 
                 maskPhaseInterrupts();
                 old_routine = 1;
