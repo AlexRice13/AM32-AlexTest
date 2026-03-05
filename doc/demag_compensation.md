@@ -17,7 +17,7 @@ can desynchronise and lose torque or stall.
 
 | Variable | Type | Description |
 |---|---|---|
-| `demag_metric` | `uint8_t` | Sliding exponential average of demag events. Range: **0** (healthy) … **255** (heavy demag). |
+| `demag_metric` | `uint8_t` | Sliding exponential average of demag events. Range: **120** (healthy) … **255** (heavy demag). |
 | `demag_metric_max` | `uint8_t` | Highest `demag_metric` value seen since power-on; never decreases. |
 | `demag_pwr_off_thresh` | `uint8_t` | Power-cutoff threshold. If `demag_metric` exceeds this value during commutation, drive power is cut briefly. **255** = compensation disabled. |
 | `flag_demag_detected` | `uint8_t` | Set to **1** at the start of each commutation cycle (pessimistic assumption). Cleared to **0** if a valid zero-cross is found before the next commutation. |
@@ -30,9 +30,9 @@ can desynchronise and lose torque or stall.
 The user-configurable `demag_comp` EEPROM setting maps to `demag_pwr_off_thresh` at startup:
 
 ```c
-demag_pwr_off_thresh = 160; // default: low compensation
-if (eepromBuffer.demag_comp == 1) {
-    demag_pwr_off_thresh = 255; // off
+demag_pwr_off_thresh = 255; // default: compensation off
+if (eepromBuffer.demag_comp == 2) {
+    demag_pwr_off_thresh = 160; // low compensation
 } else if (eepromBuffer.demag_comp == 3) {
     demag_pwr_off_thresh = 130; // high compensation
 }
@@ -40,8 +40,8 @@ if (eepromBuffer.demag_comp == 1) {
 
 | `demag_comp` | `demag_pwr_off_thresh` | Effect |
 |---|---|---|
-| 1 | 255 | Compensation disabled |
-| 2 (default) | 160 | Low sensitivity – cuts power only under significant demag |
+| 1 (default) | 255 | Compensation disabled |
+| 2 | 160 | Low sensitivity – cuts power only under significant demag |
 | 3 | 130 | High sensitivity – cuts power earlier, protects more aggressively |
 
 ---
@@ -58,7 +58,7 @@ new = (old × 7  +  event × 256) / 8
 - If `flag_demag_detected == 1` (no zero cross was found in the previous cycle),
   `event = 1` → the metric is pushed toward **255**.
 - If `flag_demag_detected == 0` (a zero cross was found), `event = 0` → the metric
-  decays back toward **0** (natural lower bound for `uint8_t`).
+  decays back toward **120** (the floor clamp).
 
 ```c
 uint16_t metric = (uint16_t)demag_metric * 7;
@@ -67,6 +67,7 @@ if (flag_demag_detected) {
     flag_demag_notify = 1;  // signal EDT telemetry
 }
 metric >>= 3;               // divide by 8
+if (metric < 120) metric = 120;  // floor clamp
 demag_metric = (uint8_t)metric;
 ```
 
@@ -75,39 +76,72 @@ default** for the upcoming cycle — it will be cleared only if a zero cross is 
 
 ---
 
-## Power cut on heavy demag (step skipping disabled)
+## Power cut and step skipping on heavy demag
 
 Immediately after the metric update, if the metric exceeds the user threshold, all FETs are
-turned off and phase interrupts are masked:
+turned off, phase interrupts are masked, and a number of **extra commutation steps to skip** is
+calculated based on how far the metric exceeds the threshold:
 
 ```c
 if (demag_metric > demag_pwr_off_thresh) {
     allOff();
     maskPhaseInterrupts();
-    // Step-skip disabled: caused motor stall during flight testing.
-    // uint8_t excess = demag_metric - demag_pwr_off_thresh;
-    // uint8_t extra_steps = excess >> 5;
-    // if (extra_steps > 2) { extra_steps = 2; }
+    // Skip 1 or more extra commutation steps based on demag severity.
+    // Each 32 counts above the threshold adds one extra skip, capped at 2.
+    uint8_t excess = demag_metric - demag_pwr_off_thresh;
+    extra_steps = excess >> 5;
+    if (extra_steps > 2) extra_steps = 2;
 }
 ```
 
-> **Note:** The extra commutation step-skip feature (which skipped 1–2 extra steps based on
-> demag severity) was disabled after flight testing revealed it caused motor stall and prevented
-> acceleration. Power is cut briefly and then restored by `comStep(step)` + `changeCompInput()`
-> in the same `commutate()` call.
+After the normal single-step advance (step+1 / step-1), any extra skips are applied:
+
+```c
+while (extra_steps > 0) {
+    // advance step one more position in the same direction
+    ...
+    extra_steps--;
+}
+```
+
+| `demag_metric − demag_pwr_off_thresh` | `extra_steps` | Total step advance |
+|---|---|---|
+| 1 – 31 | 0 | 1 step (normal) |
+| 32 – 63 | 1 | 2 steps |
+| 64 – 95 | 2 | 3 steps |
+| ≥ 96 | 2 (capped) | 3 steps |
+
+Power is restored automatically in the same call to `commutate()`: `comStep(step)` applies the
+new (post-skip) commutation phase, and `changeCompInput()` re-enables BEMF zero-cross sensing.
+The motor freewheels briefly, then self-resynchronises via back-EMF tracking on the advanced step.
 
 ---
 
-## Advance timing reduction — `adjust_comm_timing()` (disabled)
+## Advance timing reduction — `adjust_comm_timing()`
 
-`adjust_comm_timing()` was designed to reduce the advance angle proportionally when demag is
-elevated. It was **disabled** after flight testing revealed it caused motor stall:
+Even when demag does not reach the power-cut threshold, elevated demag causes commutation to
+happen too early (the advance angle is too large), which worsens the problem.
+`adjust_comm_timing()` reduces the advance angle proportionally to how far `demag_metric`
+exceeds the healthy baseline (120):
 
 ```c
-//adjust_comm_timing(); // disabled: auto timing adjust caused motor stall during flight testing
+static inline void adjust_comm_timing(void)
+{
+    if (demag_pwr_off_thresh >= 255 || demag_metric <= 120) return;
+    uint16_t reduction = (uint16_t)(((uint32_t)(demag_metric - 120) * advance) >> 7);
+    advance = (reduction < advance) ? advance - reduction : 0;
+}
 ```
 
-The function definition is retained in the source for future reference.
+| `demag_metric` | Reduction of `advance` |
+|---|---|
+| 120 | 0 % |
+| 184 | ~50 % |
+| 248 | ~100 % |
+| 255 | 100 % (floored at 0) |
+
+This function is called in `PeriodElapsedCallback()` after `advance` is computed and before
+`waitTime` is set.
 
 ---
 
@@ -132,69 +166,15 @@ The function definition is retained in the source for future reference.
 
 ## EDT telemetry reporting
 
-When DShot Extended Telemetry (EDT) is active, frame ID `0x0C` (EDT Debug [3]) is sent
-**periodically** on every `DEMAG_EDT_RATE_DIVISOR` scheduler tick. The value transmitted is
-the **peak `demag_metric`** observed since the previous EDT demag frame was sent, captured
-in the `demag_metric_edt` accumulator.
-
-### How the peak accumulator works
-
-In `commutate()` (called on every commutation), `demag_metric_edt` is updated whenever the
-current EMA value exceeds the running peak for this reporting window:
+When DShot Extended Telemetry (EDT) is active, `demag_metric` is periodically reported on
+frame ID `0x0C` and `flag_demag_notify` is cleared:
 
 ```c
-if (demag_metric > demag_metric_edt) {
-    demag_metric_edt = demag_metric;
-}
+extended_frame_to_send = 0b1100 << 8 | demag_metric;
+flag_demag_notify = 0; // clear notify after reporting
 ```
 
-In `make_dshot_package()`, when the scheduler period elapses, the peak is captured into the
-EDT frame and then the accumulator is reset atomically (interrupts briefly disabled to
-prevent `commutate()` from updating the peak between the read and the zero-write):
-
-```c
-__disable_irq();
-extended_frame_to_send = 0b1100 << 8 | demag_metric_edt;
-demag_metric_edt = 0;
-__enable_irq();
-telem_scheduler.demag_count = 0;
-```
-
-This guarantees:
-- The EDT frame is sent on every tick regardless of whether a demag event occurred (the
-  flight controller always receives an up-to-date value).
-- The reported value represents the **worst-case** demag activity seen in that window, not
-  a snapshot at an arbitrary moment.
-- The capture assignment happens strictly before the accumulator reset.
-
-### Scheduler priority ordering
-
-The EDT scheduler is an `if/else if` chain that fires at most one EDT type per effective
-tick (the slot immediately before the mandatory eRPM interleave frame).  All four counters
-increment together; whichever condition is tested *first* wins when two types are due on the
-same tick.
-
-**Root cause of "demag EDT not sending":** the original ordering placed `voltage` and `temp`
-(divisor 200) ahead of `demag` (divisor 128) in the chain.  Because demag fires *more
-frequently* than voltage/temp, every time both reached their threshold on the same tick,
-voltage or temp would take the slot and demag would be delayed.  On rare but deterministic
-ticks (multiples of `LCM(current_div, voltage_div, demag_div)`) this cascade caused demag
-to be delayed by up to 2 effective ticks, giving the appearance of missing frames.
-
-**Fix:** demag is now ordered *second*, immediately after `current` and before `voltage` and
-`temp`.  The priority order now matches the firing-frequency order: more-frequent types have
-higher priority so they are never displaced by less-frequent ones.
-
-```
-Priority  Type         Divisor  Fires every N effective ticks
-  1       current       40      most frequent
-  2       demag        128      (fixed: was incorrectly last)
-  3       voltage      200      least frequent (tied)
-  4       temp         200      least frequent (tied)
-```
-
-With this fix the maximum observed gap between consecutive demag EDT frames is **129**
-effective ticks (one-tick slip only when `current` fires on the same tick), down from 130.
+The flight controller can use this value to monitor motor health in real time.
 
 ---
 
@@ -202,26 +182,20 @@ effective ticks (one-tick slip only when `current` fires on the same tick), down
 
 ```
 Each commutation (commutate()):
-  1. Compute EMA:  demag_metric ← (demag_metric×7 + event×256) / 8, range [0, 255]
-  2. Update peak:  demag_metric_edt ← max(demag_metric_edt, demag_metric)
-  3. Update max:   demag_metric_max ← max(demag_metric_max, demag_metric)
-  4. If demag_metric > demag_pwr_off_thresh:
+  1. Compute EMA:  demag_metric ← (demag_metric×7 + event×256) / 8, clamped ≥ 120
+  2. If demag_metric > demag_pwr_off_thresh:
        a. allOff()  (brief freewheel)
-       [Step-skip disabled: was causing motor stall during flight]
-  5. Set flag_demag_detected = 1  (pessimistic default for next cycle)
-  6. Advance step by 1 in the motor direction
-  7. comStep(step) — restore power on the new step   (motor auto-continues)
-  8. changeCompInput() — re-enable BEMF zero-cross sensing on the new step
+       b. extra_steps = (demag_metric − thresh) >> 5, capped at 2
+  3. Set flag_demag_detected = 1  (pessimistic default for next cycle)
+  4. Advance step by 1 (normal) + extra_steps (demag skip) in the motor direction
+  5. comStep(step) — restore power on the new step   (motor auto-continues)
+  6. changeCompInput() — re-enable BEMF zero-cross sensing on the new step
 
 Between commutations:
   - If a zero cross is found  →  flag_demag_detected = 0
   - If timeout or desync      →  flag_demag_detected stays / is set to 1
 
 After commutation timer fires (PeriodElapsedCallback()):
-  [adjust_comm_timing() disabled: was causing motor stall during flight]
-  9. Set waitTime = commutation_interval/2 − advance
-
-Each DEMAG_EDT_RATE_DIVISOR DShot frames (make_dshot_package()):
-  10. EDT 0x0C frame = demag_metric_edt (peak since last EDT frame)
-  11. demag_metric_edt ← 0   (reset for the next window)
+  7. adjust_comm_timing() — reduce advance angle proportionally to demag excess
+  8. Set waitTime = commutation_interval/2 − advance
 ```
