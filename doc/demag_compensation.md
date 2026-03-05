@@ -167,6 +167,35 @@ This guarantees:
   a snapshot at an arbitrary moment.
 - The capture assignment happens strictly before the accumulator reset.
 
+### Scheduler priority ordering
+
+The EDT scheduler is an `if/else if` chain that fires at most one EDT type per effective
+tick (the slot immediately before the mandatory eRPM interleave frame).  All four counters
+increment together; whichever condition is tested *first* wins when two types are due on the
+same tick.
+
+**Root cause of "demag EDT not sending":** the original ordering placed `voltage` and `temp`
+(divisor 200) ahead of `demag` (divisor 128) in the chain.  Because demag fires *more
+frequently* than voltage/temp, every time both reached their threshold on the same tick,
+voltage or temp would take the slot and demag would be delayed.  On rare but deterministic
+ticks (multiples of `LCM(current_div, voltage_div, demag_div)`) this cascade caused demag
+to be delayed by up to 2 effective ticks, giving the appearance of missing frames.
+
+**Fix:** demag is now ordered *second*, immediately after `current` and before `voltage` and
+`temp`.  The priority order now matches the firing-frequency order: more-frequent types have
+higher priority so they are never displaced by less-frequent ones.
+
+```
+Priority  Type         Divisor  Fires every N effective ticks
+  1       current       40      most frequent
+  2       demag        128      (fixed: was incorrectly last)
+  3       voltage      200      least frequent (tied)
+  4       temp         200      least frequent (tied)
+```
+
+With this fix the maximum observed gap between consecutive demag EDT frames is **129**
+effective ticks (one-tick slip only when `current` fires on the same tick), down from 130.
+
 ---
 
 ## Summary — end-to-end flow

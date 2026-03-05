@@ -33,10 +33,11 @@ typedef struct {
 static dshot_telem_scheduler_t telem_scheduler = {0};
 
 // These divisors create ratios regardless of input rate:
-// - Temperature: every 200 calls (4Hz at 800Hz input)
-// - Voltage: every 200 calls (4Hz at 800Hz input)
-// - Current: every 40 calls (20Hz at 800Hz input)
-// - Demag metric: every 128 calls (~6Hz at 800Hz input)
+// - Current:      every 40 calls  (20 Hz at 800 Hz input) — highest priority
+// - Demag metric: every 128 calls (~6 Hz at 800 Hz input) — before voltage/temp to
+//                 avoid priority inversion (128 < 200, so demag fires more often)
+// - Voltage:      every 200 calls  (4 Hz at 800 Hz input)
+// - Temperature:  every 200 calls  (4 Hz at 800 Hz input)
 // - eRPM: fills all other slots
 
 #define TEMP_EDT_RATE_DIVISOR    200
@@ -263,15 +264,9 @@ void make_dshot_package(uint16_t com_time)
                 extended_frame_to_send = 0b0110 << 8 | (uint8_t)(actual_current / 50);
                 telem_scheduler.current_count = 0;
             }
-            else if (telem_scheduler.voltage_count >= VOLTAGE_EDT_RATE_DIVISOR) {
-                extended_frame_to_send = 0b0100 << 8 | (uint8_t)(battery_voltage / 25);
-                telem_scheduler.voltage_count = 0;
-            }
-            else if (telem_scheduler.temp_count >= TEMP_EDT_RATE_DIVISOR) {
-                extended_frame_to_send = 0b0010 << 8 | degrees_celsius;
-                telem_scheduler.temp_count = 0;
-            }
             else if (telem_scheduler.demag_count >= DEMAG_EDT_RATE_DIVISOR) {
+                // Demag checked before voltage/temp (divisor 128 < 200) to prevent
+                // priority inversion — voltage/temp must not delay a more-frequent type.
                 // Atomically capture the peak and reset the accumulator so that a
                 // commutation interrupt between capture and reset cannot cause a lost update.
                 __disable_irq();
@@ -279,6 +274,14 @@ void make_dshot_package(uint16_t com_time)
                 demag_metric_edt = 0;
                 __enable_irq();
                 telem_scheduler.demag_count = 0;
+            }
+            else if (telem_scheduler.voltage_count >= VOLTAGE_EDT_RATE_DIVISOR) {
+                extended_frame_to_send = 0b0100 << 8 | (uint8_t)(battery_voltage / 25);
+                telem_scheduler.voltage_count = 0;
+            }
+            else if (telem_scheduler.temp_count >= TEMP_EDT_RATE_DIVISOR) {
+                extended_frame_to_send = 0b0010 << 8 | degrees_celsius;
+                telem_scheduler.temp_count = 0;
             }
         }
     }
