@@ -49,6 +49,11 @@ extern int e_com_time;
 extern char EDT_ARM_ENABLE;
 extern char EDT_ARMED;
 extern uint16_t send_extended_dshot;
+extern uint8_t Demag_Detected_Metric;
+extern uint8_t Demag_Detected_Metric_Max;
+extern uint8_t Flag_Demag_Notify;
+extern uint8_t Flag_Desync_Notify;
+extern uint8_t Flag_Stall_Notify;
 #ifdef NEED_INPUT_READY
 extern volatile char input_ready;
 #endif
