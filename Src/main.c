@@ -365,6 +365,14 @@ uint16_t reverse_speed_threshold = 1500;
 uint8_t desync_happened = 0;
 char maximum_throttle_change_ramp = 1;
 
+// Demag metric tracking
+volatile uint8_t demag_detected = 0;
+uint8_t Demag_Detected_Metric = 120;
+uint8_t Demag_Detected_Metric_Max = 120;
+uint8_t Flag_Demag_Notify = 0;
+uint8_t Flag_Desync_Notify = 0;
+uint8_t Flag_Stall_Notify = 0;
+
 char crawler_mode = 0; // no longer used //
 uint16_t velocity_count = 0;
 uint16_t velocity_count_threshold = 75;
@@ -833,6 +841,22 @@ void getBemfState()
     }
 }
 
+void updateDemagMetric()
+{
+    uint16_t temp = (uint16_t)Demag_Detected_Metric * 7;
+    if (demag_detected) {
+        temp += 256;
+        Flag_Demag_Notify = 1;
+    }
+    Demag_Detected_Metric = (uint8_t)(temp >> 3);
+    if (Demag_Detected_Metric < 120) {
+        Demag_Detected_Metric = 120;
+    }
+    if (Demag_Detected_Metric > Demag_Detected_Metric_Max) {
+        Demag_Detected_Metric_Max = Demag_Detected_Metric;
+    }
+}
+
 void commutate()
 {
     if (forward == 1) {
@@ -867,6 +891,7 @@ void commutate()
     bemfcounter = 0;
     zcfound = 0;
     commutation_intervals[step - 1] = commutation_interval; // just used to calulate average
+    demag_detected = 1; // assume demag until proven otherwise
     
 #ifdef USE_PULSE_OUT
 	if(step == 1 || step == 4  ){
@@ -878,6 +903,7 @@ void commutate()
 void PeriodElapsedCallback()
 {
     DISABLE_COM_TIMER_INT(); // disable interrupt
+    updateDemagMetric();
     commutate();
     commutation_interval = ((commutation_interval)+((lastzctime + thiszctime) >> 1))>>1;
   	if (!eepromBuffer.auto_advance) {
@@ -917,6 +943,7 @@ void interruptRoutine()
                 return;
             }
         }
+    demag_detected = 0; // valid zero-crossing found
     __disable_irq();
     maskPhaseInterrupts();
     lastzctime = thiszctime;
@@ -1379,11 +1406,13 @@ void tenKhzRoutine()
                 if (rising) {
                     if (bemfcounter > min_bemf_counts_up) {
                         zcfound = 1;
+                        demag_detected = 0; // valid zero-crossing found
                         zcfoundroutine();
                     }
                 } else {
                     if (bemfcounter > min_bemf_counts_down) {
                         zcfound = 1;
+                        demag_detected = 0; // valid zero-crossing found
                         zcfoundroutine();
                     }
                 }
@@ -1579,6 +1608,7 @@ void zcfoundroutine()
 #ifdef MCU_AT32
 		COM_TIMER->pr = waitTime;
 #endif
+    updateDemagMetric();
     commutate();
     bemfcounter = 0;
     bad_count = 0;
@@ -1966,6 +1996,7 @@ if(zero_crosses < 5){
             if ((getAbsDif(last_average_interval, average_interval) > average_interval >> 1) && (average_interval < 2000)) { // throttle resitricted before zc 20.
                 zero_crosses = 0;
                 desync_happened++;
+                Flag_Desync_Notify = 1;
                 if ((!eepromBuffer.bi_direction && (input > 47)) || commutation_interval > 1000) {
                     running = 0;
                 }
@@ -2127,11 +2158,13 @@ if(zero_crosses < 5){
                     if (rising) {
                         if (bemfcounter > min_bemf_counts_up) {
                             zcfound = 1;
+                            demag_detected = 0; // valid zero-crossing found
                             zcfoundroutine();
                         }
                     } else {
                         if (bemfcounter > min_bemf_counts_down) {
                             zcfound = 1;
+                            demag_detected = 0; // valid zero-crossing found
                             zcfoundroutine();
                         }
                     }
@@ -2140,6 +2173,7 @@ if(zero_crosses < 5){
 #endif
             if (INTERVAL_TIMER_COUNT > 45000 && running == 1) {
                 bemf_timeout_happened++;
+                Flag_Stall_Notify = 1;
 
                 maskPhaseInterrupts();
                 old_routine = 1;

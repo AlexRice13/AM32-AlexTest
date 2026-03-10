@@ -26,6 +26,8 @@ typedef struct {
     uint16_t temp_count;
     uint16_t voltage_count;
     uint16_t current_count;
+    uint16_t demag_count;
+    uint16_t status_count;
     uint8_t last_sent_extended;
 } dshot_telem_scheduler_t;
 
@@ -35,11 +37,15 @@ static dshot_telem_scheduler_t telem_scheduler = {0};
 // - Temperature: every 200 calls (4Hz at 800Hz input)
 // - Voltage: every 200 calls (4Hz at 800Hz input)
 // - Current: every 40 calls (20Hz at 800Hz input)
+// - Demag: every 50 calls (~16Hz at 800Hz input)
+// - Status: every 100 calls (~8Hz at 800Hz input)
 // - eRPM: fills all other slots
 
 #define TEMP_EDT_RATE_DIVISOR    200
 #define VOLTAGE_EDT_RATE_DIVISOR 200
 #define CURRENT_EDT_RATE_DIVISOR 40
+#define DEMAG_EDT_RATE_DIVISOR   50
+#define STATUS_EDT_RATE_DIVISOR  100
 
 
 char send_EDT_init;
@@ -252,10 +258,38 @@ void make_dshot_package(uint16_t com_time)
             telem_scheduler.current_count++;
             telem_scheduler.voltage_count++;
             telem_scheduler.temp_count++;
+            telem_scheduler.demag_count++;
+            telem_scheduler.status_count++;
 
             if (telem_scheduler.current_count >= CURRENT_EDT_RATE_DIVISOR) {
                 extended_frame_to_send = 0b0110 << 8 | (uint8_t)(actual_current / 50);
                 telem_scheduler.current_count = 0;
+            }
+            else if (telem_scheduler.demag_count >= DEMAG_EDT_RATE_DIVISOR) {
+                extended_frame_to_send = 0b1100 << 8 | Demag_Detected_Metric;
+                telem_scheduler.demag_count = 0;
+            }
+            else if (telem_scheduler.status_count >= STATUS_EDT_RATE_DIVISOR) {
+                uint8_t scaled_peak = (Demag_Detected_Metric_Max - 120) / 9;
+                if (scaled_peak > 15) {
+                    scaled_peak = 15;
+                }
+                uint8_t status_byte = (scaled_peak & 0x1F);
+                if (Flag_Demag_Notify) {
+                    status_byte |= 0x80;
+                    Flag_Demag_Notify = 0;
+                }
+                if (Flag_Desync_Notify) {
+                    status_byte |= 0x40;
+                    Flag_Desync_Notify = 0;
+                }
+                if (Flag_Stall_Notify) {
+                    status_byte |= 0x20;
+                    Flag_Stall_Notify = 0;
+                }
+                Demag_Detected_Metric_Max = 120;
+                extended_frame_to_send = 0b1110 << 8 | status_byte;
+                telem_scheduler.status_count = 0;
             }
             else if (telem_scheduler.voltage_count >= VOLTAGE_EDT_RATE_DIVISOR) {
                 extended_frame_to_send = 0b0100 << 8 | (uint8_t)(battery_voltage / 25);
