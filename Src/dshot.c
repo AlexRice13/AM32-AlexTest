@@ -270,11 +270,12 @@ void make_dshot_package(uint16_t com_time)
                 telem_scheduler.demag_count = 0;
             }
             else if (telem_scheduler.status_count >= STATUS_EDT_RATE_DIVISOR) {
+                // scale 120-255 range to 0-15: (max - 120) / 9, where 9 = (255-120)/15
                 uint8_t scaled_peak = (Demag_Detected_Metric_Max - 120) / 9;
                 if (scaled_peak > 15) {
                     scaled_peak = 15;
                 }
-                uint8_t status_byte = (scaled_peak & 0x1F);
+                uint8_t status_byte = (scaled_peak & 0x0F);
                 if (Flag_Demag_Notify) {
                     status_byte |= 0x80;
                     Flag_Demag_Notify = 0;

@@ -843,6 +843,9 @@ void getBemfState()
 
 void updateDemagMetric()
 {
+    // EMA with sliding window of 8: new = (old * 7 + sample) / 8
+    // sample is 256 (full byte) if demag detected, 0 otherwise
+    // result clamped to 120-255 range
     uint16_t temp = (uint16_t)Demag_Detected_Metric * 7;
     if (demag_detected) {
         temp += 256;
